@@ -1,0 +1,37 @@
+name: payment-processing-tests
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments_test
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: payments
+      RABBITMQ_DEFAULT_PASS: payments
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      API_KEY: test-api-key-at-least-16-chars
+      DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments_test
+      TEST_DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments_test
+      TEST_RABBITMQ_URL: amqp://payments:payments@rabbitmq:5672/
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    command: ["sh", "-c", "python scripts/check_migrations.py && pytest -q -p no:cacheprovider"]

@@ -1,0 +1,79 @@
+name: payment-processing-service
+
+x-app: &app
+  build:
+    context: .
+    target: base
+  environment: &app-env
+    API_KEY: ${API_KEY:?Run python3 scripts/init_env.py first}
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-payments}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-payments}
+    RABBITMQ_URL: amqp://${RABBITMQ_USER:-payments}:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}@rabbitmq:5672/
+    OUTBOX_POLL_INTERVAL: ${OUTBOX_POLL_INTERVAL:-0.5}
+    RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-1}
+    WEBHOOK_TIMEOUT: ${WEBHOOK_TIMEOUT:-5}
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-payments}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-payments}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD}
+    ports: ["127.0.0.1:5672:5672", "127.0.0.1:15672:15672"]
+    volumes: ["rabbitmq_data:/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *app
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen(urllib.request.Request('http://localhost:8000/health',headers={'X-API-Key':os.environ['API_KEY']}),timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "app.consumer"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    stop_grace_period: 30s
+
+  webhook:
+    <<: *app
+    profiles: ["demo"]
+    command: ["uvicorn", "examples.webhook:app", "--host", "0.0.0.0", "--port", "8080"]
+    volumes: ["./examples:/service/examples:ro"]
+    ports: ["127.0.0.1:8080:8080"]
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
